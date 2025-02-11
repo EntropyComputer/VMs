@@ -4,9 +4,9 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2
 LIBS = -lvirt
 
 # Targets
-TARGET = vm_manager
-SOURCES = main.cpp vm.cpp
-HEADERS = vm.hpp
+TARGET = vm
+SOURCES = main.cpp vm.cpp 
+HEADERS = vm.hpp 
 OBJECTS = $(SOURCES:.cpp=.o)
 
 # Default target

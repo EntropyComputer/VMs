@@ -44,5 +44,7 @@ int virDomainCreate(virDomainPtr domain);
 
 ##### Useful Terminal Commands
 ```virsh dominfo *vmName*```
+
 ```virsh list -all```
+
 ```virsh undefine dynamic-vm```

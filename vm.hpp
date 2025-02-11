@@ -14,4 +14,4 @@
 // - false otherwise
 bool vm_spinUp(const std::string& vmName, int memoryMB, int vcpus, const std::string& diskPath);
 
-#endif 
+#endif
