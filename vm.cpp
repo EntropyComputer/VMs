@@ -1,179 +1,153 @@
 #include "vm.hpp"
 #include <iostream>
-#include <fstream>
 #include <libvirt/libvirt.h>
-#include <cstdlib>   // For system()
-#include <unistd.h>  // For access(), unlink()
+#include <cstdlib>       // For system()
+#include <unistd.h>      // For access() and unlink()
+#include <filesystem>
+#include <sstream>
+#include <chrono>
+#include <thread>
+
+bool copyOvmfFile(const std::string& source, const std::string& destination);
 
 bool vm_spinUp(const std::string& vmName, int memoryMB, int vcpus, const std::string& diskPath) {
-  // Step 1: Connect to the hypervisor
+  // Step 1: Connect to the hypervisor.
   virConnectPtr connection = virConnectOpen("qemu:///system");
   if (!connection) {
     std::cerr << "Failed to connect to hypervisor" << std::endl;
     return false;
   }
 
-  // Step 2: If the VM’s disk image already exists, remove it
-  if (access(diskPath.c_str(), F_OK) == 0) {
-    if (unlink(diskPath.c_str()) != 0) {
-      std::cerr << "Failed to remove existing disk image" << std::endl;
+  // Step 2
+  if (!std::filesystem::exists(diskPath)) {
+    // Creates a qcow2 overlay disk for each user, based on the golden image
+    // All writes and changes made by the user are stored in their personal overlay disk.
+    // This is automatic. Every time the Windows VM does a "write" operation, QEMU/KVM intercepts it
+    // and stores the change in the user's qcow2 file.
+    std::cout << "Creating new qcow2 disk: " << diskPath << std::endl;
+    std::string goldenImagePath = "/var/lib/libvirt/images/golden-windows11.qcow2";
+    std::ostringstream createImageCmd;
+    createImageCmd << "qemu-img create -f qcow2 -b " << goldenImagePath << " -F qcow2 " << diskPath << " 60G";
+    if (system(createImageCmd.str().c_str()) != 0) {
+      std::cerr << "Failed to create qcow2 overlay image" << std::endl;
       virConnectClose(connection);
       return false;
     }
+  } else {
+    // if the golden image has been instantiated for the user, use the version we already made
+    std::cout << "Using existing persistent disk: " << diskPath << std::endl;
   }
 
-  // Step 3: Create a new qcow2 image for the VM (20GB, based on ubuntu-preinstalled.qcow2)
-  std::string baseImagePath = "/var/lib/libvirt/images/ubuntu-preinstalled.qcow2";
-  std::string createImageCmd = "qemu-img create -f qcow2 -F qcow2 -b " + baseImagePath + " " + diskPath + " 20G";
-  if (system(createImageCmd.c_str()) != 0) {
-    std::cerr << "Failed to create qcow2 image" << std::endl;
+  // Step 4: Prepare the OVMF NVRAM file for UEFI boot.
+  std::string ovmfSource      = "/usr/share/OVMF/OVMF_VARS_4M.fd";
+  std::string nvramDir        = "/home/jjquaratiello/nvram/";
+  std::string ovmfDestination = nvramDir + vmName + "_VARS.fd";
+
+  if (!std::filesystem::exists(nvramDir)) {
+    std::cerr << "Error: NVram directory " << nvramDir 
+              << " does not exist. Please create it before running the application." << std::endl;
     virConnectClose(connection);
     return false;
   }
 
-  // ------------------------------------------------------------------
-  //  Generate cloud-init seed ISO with user-data and meta-data
-  // ------------------------------------------------------------------
-
-  // Temporary file paths (unique per VM name)
-  std::string userDataPath = "/tmp/user-data-" + vmName;
-  std::string metaDataPath = "/tmp/meta-data-" + vmName;
-  std::string isoPath      = "/tmp/seed-" + vmName + ".iso";
-
-  // The SHA-512 hash below corresponds to the password "ubuntu".
-  // Generated via:  mkpasswd -m sha-512 'ubuntu'
-  // Please note: This is just an example. For real deployments, consider stronger credentials.
-  std::string hashedUbuntuPassword = "$6$OEtKBfPUc9z1.3zh$BvDSIJzSmmPvmfGHN2nsBUA8t5kJgohJqa5Zad5X4iYND2tycDXcmWnV0mG2qib2DrtOorZ6qJjJHfvdzvoC1/";
-
-  // 1) user-data (cloud-config) for "ubuntu"/"ubuntu"
-  std::string userData = R"(#cloud-config
-
-users:
-  - name: ubuntu
-    groups: sudo
-    shell: /bin/bash
-    lock_passwd: false
-    passwd: )" + hashedUbuntuPassword + R"(
-    sudo: ALL=(ALL) NOPASSWD:ALL
-
-ssh_pwauth: true
-chpasswd:
-  expire: false
-)";
-
-  // 2) meta-data (just minimal info: instance-id, hostname)
-  std::string metaData = "instance-id: " + vmName + "\n"
-                         "local-hostname: " + vmName + "\n";
-
-  // Write user-data to file
-  {
-    std::ofstream udFile(userDataPath);
-    if (!udFile) {
-      std::cerr << "Failed to create user-data file" << std::endl;
-      virConnectClose(connection);
-      return false;
-    }
-    udFile << userData;
-  }
-
-  // Write meta-data to file
-  {
-    std::ofstream mdFile(metaDataPath);
-    if (!mdFile) {
-      std::cerr << "Failed to create meta-data file" << std::endl;
-      virConnectClose(connection);
-      return false;
-    }
-    mdFile << metaData;
-  }
-
-  // Build the seed ISO with volume label "cidata"
-  // Requires genisoimage or mkisofs. Install with "sudo apt-get install genisoimage"
-  std::string buildIsoCmd = "genisoimage -output " + isoPath +
-                            " -volid cidata -joliet -rock " +
-                            userDataPath + " " + metaDataPath;
-  if (system(buildIsoCmd.c_str()) != 0) {
-    std::cerr << "Failed to create cloud-init ISO" << std::endl;
+  if (!copyOvmfFile(ovmfSource, ovmfDestination)) {
+    std::cerr << "Failed to prepare the OVMF NVRAM file for VM: " << vmName << std::endl;
     virConnectClose(connection);
     return false;
   }
 
-  // ---------------------------------------------------
-  // Step 4: Dynamically generate the VM domain XML
-  // ---------------------------------------------------
-  // Attach both the primary disk (QCOW2) and the seed ISO (CD-ROM),
-  // using VNC for graphics.
+  // Step 5: Construct the XML configuration.
+  // Note: The XML below attaches a CDROM device (pointing to a Windows ISO)
+  // which you can use to install drivers if needed, and sets up secure boot, TPM, etc.
 
-  std::string vmXML = R"(
-<domain type='kvm'>
-  <name>)" + vmName + R"(</name>
-  <memory unit='MiB'>)" + std::to_string(memoryMB) + R"(</memory>
-  <vcpu>)" + std::to_string(vcpus) + R"(</vcpu>
-  <os>
-    <type arch='x86_64' machine='pc-i440fx-5.2'>hvm</type>
-    <boot dev='hd'/>
-    <bootmenu enable='yes'/>
-  </os>
-  <devices>
-    <!-- Main QCOW2 disk -->
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file=')" + diskPath + R"(' />
-      <target dev='vda' bus='virtio'/>
-    </disk>
+  // xml is all attributes
+  // std::string windowsIsoPath = "/var/lib/libvirt/images/windows11.iso";
+  std::string vmXML = std::string(R"XML(<domain type='kvm'>
+    <name>)XML") + vmName + std::string(R"XML(</name>
+    <memory unit='MiB'>)XML") + std::to_string(memoryMB) + std::string(R"XML(</memory>
+    <vcpu>)XML") + std::to_string(vcpus) + std::string(R"XML(</vcpu>  
+    <os> d
+      <type arch='x86_64' machine='pc-q35-5.2'>hvm</type>
+      <loader readonly='yes' type='pflash' secure='yes'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
+      <nvram>)XML") + ovmfDestination + std::string(R"XML(</nvram>
+      <boot dev='cdrom' order='1'/>
+      <boot dev='hd' order='2'/>
+    </os>
+    <features>
+      <acpi/>
+      <apic/>
+      <smm state='on'/>
+      <hyperv>
+        <relaxed state='on'/>
+        <vapic state='on'/>
+        <spinlocks state='on' retries='8191'/>
+      </hyperv>
+    </features>
+    <cpu mode='host-passthrough'/>
+    <devices>
+      <disk type='file' device='disk'>
+        <driver name='qemu' type='qcow2'/>
+        <source file=")XML") + diskPath + std::string(R"XML("/>
+        <target dev='sda' bus='sata'/>
+      </disk>
+      <interface type='network'>
+        <source network='default'/>
+      </interface>
+      <video>
+        <model type='qxl' ram='262144' vram='262144' vgamem='32768' heads='1'>
+          <acceleration accel3d='no'/>
+        </model>
+      </video>
+      <graphics type='spice' autoport='yes' listen='0.0.0.0'>
+        <listen type='address' address='0.0.0.0'/>
+      </graphics>
+      <input type='keyboard' bus='usb'/>
+      <input type='tablet' bus='usb'/> 
+      <tpm model='tpm-tis'>
+        <backend type='emulator'/>
+      </tpm>
+    </devices>
+  </domain>)XML");
 
-    <!-- Cloud-init seed ISO (readonly) -->
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file=')" + isoPath + R"(' />
-      <target dev='hdc' bus='ide'/>
-      <readonly/>
-    </disk>
-
-    <interface type='network'>
-      <source network='default'/>
-    </interface>
-
-    <video>
-      <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'>
-        <acceleration accel3d='no'/>
-      </model>
-      <driver name='qemu'/>
-    </video>
-
-    <graphics type='vnc' autoport='yes' listen='0.0.0.0'>
-      <listen type='address' address='0.0.0.0'/>
-    </graphics>
-  </devices>
-</domain>
-)";
-
-  // Step 5: Define the domain with the generated XML
+  // Step 6: Define the VM persistently.
+  std::cout << "Defining the VM in libvirt..." << std::endl;
   virDomainPtr vm = virDomainDefineXML(connection, vmXML.c_str());
   if (!vm) {
-    std::cerr << "Failed to define VM" << std::endl;
+    std::cerr << "Failed to define VM. Check the XML configuration." << std::endl;
     virConnectClose(connection);
     return false;
   }
 
-  // Step 6: Start (create) the VM
+  // Step 7: Start the VM.
   if (virDomainCreate(vm) < 0) {
-    std::cerr << "Failed to start VM" << std::endl;
+    std::cerr << "Failed to start VM. Check QEMU logs for details." << std::endl;
     virDomainFree(vm);
     virConnectClose(connection);
     return false;
   }
+  
+  std::cout << "VM started successfully: " << vmName << std::endl;
 
-  std::cout << "VM started successfully" << std::endl;
+  // Return the vm
+  return vm;
 
-  // Step 7: Cleanup references
-  virDomainFree(vm);
-  virConnectClose(connection);
-
-  // (Optional) Remove the seed ISO & user-data files if you want:
-  // unlink(isoPath.c_str());
-  // unlink(userDataPath.c_str());
-  // unlink(metaDataPath.c_str());
+  // OLD: This cleans up libvirt objects, but we need those
+  // virDomainFree(vm);
+  // virConnectClose(connection);
 
   return true;
 }
+
+
+// Helper function: Copy the OVMF variables file to a writable location.
+bool copyOvmfFile(const std::string& source, const std::string& destination) {
+  try {
+    std::filesystem::copy_file(source, destination,
+        std::filesystem::copy_options::overwrite_existing);
+    return true;
+  } catch (const std::filesystem::filesystem_error& e) {
+    std::cerr << "Error copying OVMF file: " << e.what() << std::endl;
+    return false;
+  }
+}
+
