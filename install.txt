@@ -1,0 +1,2 @@
+sudo apt-get update
+sudo apt-get install -y build-essential libvirt-dev libvirt-clients libvirt-daemon-system qemu-kvm qemu-utils ovmf virt-viewer
