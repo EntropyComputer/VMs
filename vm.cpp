@@ -66,7 +66,14 @@ bool vm_spinUp(const std::string& vmName, int memoryMB, int vcpus, const std::st
     <name>)XML") + vmName + std::string(R"XML(</name>
     <memory unit='MiB'>)XML") + std::to_string(memoryMB) + std::string(R"XML(</memory>
     <vcpu>)XML") + std::to_string(vcpus) + std::string(R"XML(</vcpu>  
-    <os> d
+    <memoryBacking>
+      <hugepages/>
+      <allocation mode='immediate'/>
+    </memoryBacking>
+    <memtune>
+      <hard_limit unit='MiB'>)XML") + std::to_string(memoryMB) + std::string(R"XML(</hard_limit>
+    </memtune>
+    <os>
       <type arch='x86_64' machine='pc-q35-5.2'>hvm</type>
       <loader readonly='yes' type='pflash' secure='yes'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
       <nvram>)XML") + ovmfDestination + std::string(R"XML(</nvram>
@@ -83,15 +90,20 @@ bool vm_spinUp(const std::string& vmName, int memoryMB, int vcpus, const std::st
         <spinlocks state='on' retries='8191'/>
       </hyperv>
     </features>
-    <cpu mode='host-passthrough'/>
+    <cpu mode='host-passthrough' check='none'>
+      <topology sockets='1' dies='1' cores=')XML") + std::to_string(vcpus) + std::string(R"XML(' threads='1'/>
+      <cache mode='passthrough'/>
+    </cpu>
     <devices>
       <disk type='file' device='disk'>
-        <driver name='qemu' type='qcow2'/>
+        <driver name='qemu' type='qcow2' cache='none' io='native' discard='unmap'/>
         <source file=")XML") + diskPath + std::string(R"XML("/>
-        <target dev='sda' bus='sata'/>
+        <target dev='vda' bus='virtio'/>
       </disk>
       <interface type='network'>
         <source network='default'/>
+        <model type='virtio'/>
+        <driver name='vhost' queues='4'/>
       </interface>
       <video>
         <model type='qxl' ram='262144' vram='262144' vgamem='32768' heads='1'>
