@@ -1,11 +1,11 @@
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -Iexternal -Iinclude
 LIBS = -lvirt
 
 # Targets
 TARGET = vm
-SOURCES = main.cpp vm.cpp 
+SOURCES = main.cpp vm.cpp command_handler.cpp
 HEADERS = vm.hpp 
 OBJECTS = $(SOURCES:.cpp=.o)
 

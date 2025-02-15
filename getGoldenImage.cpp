@@ -160,6 +160,48 @@ bool vm_spinUp(const std::string& vmName, int memoryMB, int vcpus, const std::st
     return true;
 }
 
+int main () {
+
+  virConnectPtr conn = virConnectOpen("qemu:///system");
+  if (!conn) {
+      std::cerr << "Failed to connect to hypervisor" << std::endl;
+      return 1;
+  }
+    
+  std::string vmName = "goldenImage";
+  int memoryMB = 4096;
+  int vcpus = 4;
+
+  // Automatically construct the disk path using the vmName.
+  std::string diskPath = "/var/lib/libvirt/images/" + vmName + ".qcow2";
+
+  // Display VM configuration.
+  std::cout << "VM Configuration:" << std::endl;
+  std::cout << "Name: " << vmName << std::endl;
+  std::cout << "Memory: " << memoryMB << " MB" << std::endl;
+  std::cout << "vCPUs: " << vcpus << std::endl;
+  std::cout << "Disk Path: " << diskPath << std::endl;
+
+  // Check if a domain with this name already exists.
+  virDomainPtr dom = virDomainLookupByName(conn, vmName.c_str());
+  if (dom) {
+      virDomainFree(dom);
+      virConnectClose(conn);
+      throw std::invalid_argument("Tried to spin up a VM that already exists. Use the \"start\" command instead.");
+  }
+
+  // Attempt to create and start the VM.
+  if (vm_spinUp("goldenImage", memoryMB, vcpus, diskPath)) {
+      std::cout << "Successfully created and started the VM: " << vmName << std::endl;
+  } else {
+      std::cerr << "Failed to create and start the VM: " << vmName << std::endl;
+      virConnectClose(conn);
+      return 1;
+  }
+  virConnectClose(conn);
+  return 0;
+}
+
 
 
 

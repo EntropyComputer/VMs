@@ -14,4 +14,6 @@
 // - false otherwise
 bool vm_spinUp(const std::string& vmName, int memoryMB, int vcpus, const std::string& diskPath);
 
+bool vm_spinUpGoldenImage();
+
 #endif
